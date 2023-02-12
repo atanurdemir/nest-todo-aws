@@ -1,0 +1,63 @@
+name: Deploy to AWS
+
+on: workflow_dispatch
+
+env:
+  AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+  AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+  ACCESS_SECRET: ${{ secrets.ACCESS_SECRET }}
+  REFRESH_SECRET: ${{ secrets.REFRESH_SECRET }}
+  NODE_ENV: ${{ secrets.NODE_ENV }}
+  AWS_REGION: ${{ secrets.AWS_REGION }}
+  ACCOUNT_ID: ${{ secrets.ACCOUNT_ID }}
+  BUILD_COUNTER: ${{ github.run_number }}
+  ENVIRONMENT: ${{ secrets.ENVIRONMENT }}
+  FIRESTORE_CREDENTIALS: ${{ secrets.FIRESTORE_CREDENTIALS }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Create Environment Variables
+        working-directory: ./application
+        run: |
+          echo "ACCESS_SECRET=${ACCESS_SECRET}" > .env
+          echo "REFRESH_SECRET=${REFRESH_SECRET}" >> .env
+          echo "${FIRESTORE_CREDENTIALS}" >> credentials.json
+
+      - name: Build Docker
+        run: |
+          cd application
+          docker build -f Dockerfile . -t "${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/backend-services:latest" -t "${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/backend-services:${BUILD_COUNTER}"
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@13d241b293754004c80624b5567555c4a39ffbe3
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+
+      - name: Deploy Image
+        run: |
+          docker push "${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/backend-services:latest"
+          docker push "${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/backend-services:${BUILD_COUNTER}"
+
+      - name: Setup Terraform with specified version on the runner
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: 1.3.7
+
+      - name: Terraform Init & Apply
+        working-directory: ./infrastructure/main
+        run: |
+          terraform init -backend-config="backend/${NODE_ENV}.tf"
+          terraform workspace select ${ENVIRONMENT}
+          terraform apply -target=module.ecs -var="allowed_account_ids=${ACCOUNT_ID}" -var="backend_image=${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/backend-services:${BUILD_COUNTER}" -auto-approve
